@@ -144,6 +144,9 @@ func (a *Analyzer) IsOverlyPermissiveHeaders(headers string) bool {
 }
 
 func (a *Analyzer) ShouldHaveCORS(resp *http.Response) bool {
+	if resp == nil {
+		return false
+	}
 	// Heuristic: API endpoints should have CORS
 	contentType := resp.Header.Get("Content-Type")
 	apiPatterns := []string{
@@ -153,9 +156,14 @@ func (a *Analyzer) ShouldHaveCORS(resp *http.Response) bool {
 		"/v1/", "/v2/", "/v3/",
 	}
 
+	reqPath := ""
+	if resp.Request != nil && resp.Request.URL != nil {
+		reqPath = resp.Request.URL.Path
+	}
+
 	for _, pattern := range apiPatterns {
 		if strings.Contains(contentType, pattern) ||
-			strings.Contains(resp.Request.URL.Path, pattern) {
+			(reqPath != "" && strings.Contains(reqPath, pattern)) {
 			return true
 		}
 	}

@@ -12,7 +12,7 @@ OriginStrike is a high-performance, concurrent CORS vulnerability scanner and ex
 
                          🔥 ULTIMATE CORS EXPLOITATION SUITE 🔥
                                    Author: whoami_404
-                            [ZERO FALSE POSITIVES - GOD MODE]
+                           [ZERO FALSE POSITIVES - GOD MODE]
 ```
 
 ---

@@ -43,8 +43,12 @@ func (cr *CSVReporter) Validate() error {
 	if cr.outputPath == "" {
 		return fmt.Errorf("output path is required")
 	}
+	lastDot := strings.LastIndex(cr.outputPath, ".")
+	if lastDot == -1 {
+		return fmt.Errorf("output file must have .csv or .tsv extension")
+	}
 	validExts := map[string]bool{".csv": true, ".tsv": true}
-	ext := strings.ToLower(cr.outputPath[strings.LastIndex(cr.outputPath, "."):])
+	ext := strings.ToLower(cr.outputPath[lastDot:])
 	if !validExts[ext] {
 		return fmt.Errorf("output file must have .csv or .tsv extension")
 	}

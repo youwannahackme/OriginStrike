@@ -2,16 +2,18 @@ package core
 
 import (
 	"context"
-	"github.com/youwannahackme/originstrike/config"
-	"github.com/youwannahackme/originstrike/http"
-	"github.com/youwannahackme/originstrike/payloads"
-	"github.com/youwannahackme/originstrike/utils"
 	"fmt"
 	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/fatih/color"
+	"github.com/youwannahackme/originstrike/config"
+	"github.com/youwannahackme/originstrike/http"
+	"github.com/youwannahackme/originstrike/payloads"
+	"github.com/youwannahackme/originstrike/utils"
 )
 
 type Scanner struct {
@@ -22,12 +24,16 @@ type Scanner struct {
 	validator    *Validator
 	payloadGen   *payloads.Generator
 	stats        *ScanStats
-	results      []*ScanResult
-	resultsMutex sync.RWMutex
-	wg           sync.WaitGroup
-	sem          chan struct{}
-	ctx          context.Context
-	cancel       context.CancelFunc
+	results            []*ScanResult
+	resultsMutex       sync.RWMutex
+	failedResults      []*ScanResult
+	failedResultsMutex sync.Mutex
+	safeResults        []*ScanResult
+	safeResultsMutex   sync.Mutex
+	wg                 sync.WaitGroup
+	sem                chan struct{}
+	ctx                context.Context
+	cancel             context.CancelFunc
 }
 
 type ScanStats struct {
@@ -67,16 +73,46 @@ func NewScanner(cfg *config.Config) *Scanner {
 	return &Scanner{
 		config:     cfg,
 		client:     http.NewClient(cfg),
-		detector:   NewDetector(),
+		detector:   NewDetector(cfg),
 		analyzer:   NewAnalyzer(),
 		validator:  NewValidator(cfg),
 		payloadGen: payloads.NewGenerator(),
 		stats:      &ScanStats{StartTime: time.Now()},
 		sem:        make(chan struct{}, cfg.Concurrency),
-		ctx:        ctx,
-		cancel:     cancel,
-		results:    make([]*ScanResult, 0),
+		ctx:           ctx,
+		cancel:        cancel,
+		results:       make([]*ScanResult, 0),
+		failedResults: make([]*ScanResult, 0),
+		safeResults:   make([]*ScanResult, 0),
 	}
+}
+
+func (s *Scanner) recordFailedResult(res *ScanResult) {
+	s.failedResultsMutex.Lock()
+	s.failedResults = append(s.failedResults, res)
+	s.failedResultsMutex.Unlock()
+}
+
+func (s *Scanner) recordSafeResult(res *ScanResult) {
+	if s.config.ShowAll && !s.config.Silent {
+		color.New(color.FgBlue, color.Bold).Printf("[SAFE] ")
+		color.New(color.FgWhite).Printf("%s (Origin: %s) --> Origin Not Reflected\n", res.URL, res.Origin)
+	}
+	s.safeResultsMutex.Lock()
+	s.safeResults = append(s.safeResults, res)
+	s.safeResultsMutex.Unlock()
+}
+
+func (s *Scanner) GetFailedResults() []*ScanResult {
+	s.failedResultsMutex.Lock()
+	defer s.failedResultsMutex.Unlock()
+	return append([]*ScanResult(nil), s.failedResults...)
+}
+
+func (s *Scanner) GetSafeResults() []*ScanResult {
+	s.safeResultsMutex.Lock()
+	defer s.safeResultsMutex.Unlock()
+	return append([]*ScanResult(nil), s.safeResults...)
 }
 
 func (s *Scanner) Start() ([]*ScanResult, error) {
@@ -114,16 +150,73 @@ loop:
 
 	// Run active verification on candidate results to guarantee zero false positives
 	var verifiedResults []*ScanResult
-	for _, res := range s.results {
-		if s.detector.VerifyVulnerability(res) {
-			verifiedResults = append(verifiedResults, res)
-		} else if s.config.Verbose {
-			utils.LogInfo("Active verification failed for candidate vuln at %s (Origin: %s)", res.URL, res.Origin)
-		}
+	var failedVerifications []*ScanResult
+	var verifMutex sync.Mutex
+
+	verifConcurrency := s.config.Concurrency
+	if verifConcurrency < 1 {
+		verifConcurrency = 1
+	}
+	if verifConcurrency > 20 {
+		verifConcurrency = 20
+	}
+	if verifConcurrency > len(s.results) {
+		verifConcurrency = len(s.results)
 	}
 
-	// Validate all results (Zero False Positive Guarantee)
-	validatedResults := s.validator.ValidateAll(verifiedResults)
+	if verifConcurrency > 0 {
+		verifSem := make(chan struct{}, verifConcurrency)
+		var verifWg sync.WaitGroup
+
+		for _, candidate := range s.results {
+			res := candidate
+			verifWg.Add(1)
+			go func() {
+				defer verifWg.Done()
+				verifSem <- struct{}{}
+				defer func() { <-verifSem }()
+
+				if s.detector.VerifyVulnerability(res) {
+					isValid, reason := s.validator.Validate(res)
+					if isValid {
+						res.Confidence = s.validator.calculateFinalConfidence(res)
+						verifMutex.Lock()
+						verifiedResults = append(verifiedResults, res)
+						verifMutex.Unlock()
+					} else {
+						if s.config.Verbose || s.config.ShowFailed {
+							if !s.config.Silent {
+								color.New(color.FgYellow, color.Bold).Printf("[FILTER] ")
+								color.New(color.FgWhite).Printf("%s (Origin: %s) --> %s\n", res.URL, res.Origin, reason)
+							}
+						}
+						filteredCopy := *res
+						filteredCopy.Status = "FILTERED"
+						filteredCopy.Description = fmt.Sprintf("Filtered out by validation rules (%s). Original: %s", reason, res.Description)
+						s.recordFailedResult(&filteredCopy)
+					}
+				} else {
+					if s.config.Verbose || s.config.ShowFailed {
+						if !s.config.Silent {
+							color.New(color.FgYellow, color.Bold).Printf("[FAIL] ")
+							color.New(color.FgWhite).Printf("%s (Origin: %s) --> Active verification failed\n", res.URL, res.Origin)
+						}
+					}
+					failedCopy := *res
+					failedCopy.Status = "FAILED_VERIFICATION"
+					failedCopy.Description = fmt.Sprintf("Active verification failed for candidate origin '%s' at %s.", res.Origin, res.URL)
+					verifMutex.Lock()
+					failedVerifications = append(failedVerifications, &failedCopy)
+					verifMutex.Unlock()
+					s.recordFailedResult(&failedCopy)
+				}
+			}()
+		}
+		verifWg.Wait()
+	}
+
+	// Validate all results (Zero False Positive Guarantee - deduplication & sort)
+	validatedResults, _ := s.validator.ValidateAll(verifiedResults)
 
 	return validatedResults, nil
 }
@@ -164,7 +257,8 @@ func (s *Scanner) scanURL(targetURL string) []*ScanResult {
 	var results []*ScanResult
 
 	if !s.config.Silent {
-		utils.LogInfo("Scanning: %s", targetURL)
+		color.New(color.FgHiBlue, color.Bold).Printf("[INFO] ")
+		color.New(color.FgWhite).Printf("Scanning target: %s\n", targetURL)
 	}
 
 	// Phase 1: Basic CORS Header Detection
@@ -289,8 +383,6 @@ func (s *Scanner) phase2AdvancedOriginTesting(targetURL string) []*ScanResult {
 		case <-s.ctx.Done():
 			return results
 		default:
-			atomic.AddInt64(&s.stats.TotalOriginsTested, 1)
-
 			result := s.testOrigin(targetURL, origin)
 			if result != nil {
 				results = append(results, result)
@@ -312,14 +404,15 @@ func (s *Scanner) testOrigin(targetURL, origin string) *ScanResult {
 	}
 
 	atomic.AddInt64(&s.stats.TotalRequests, 1)
+	atomic.AddInt64(&s.stats.TotalOriginsTested, 1)
 
 	// Check if origin is reflected in Allow-Origin header
 	allowOrigin := resp.Headers.Get("Access-Control-Allow-Origin")
 
 	if (allowOrigin == origin || s.analyzer.IsOriginReflected(origin, allowOrigin)) && !s.detector.isTrustedOrigin(targetURL, origin) {
 		severity := s.calculateSeverity(origin, resp)
-		vulnType := "Arbitrary Origin Allowed"
-		title := fmt.Sprintf("CORS Misconfiguration - Origin '%s' Allowed", origin)
+		vulnType := "Arbitrary Origin Reflection"
+		title := fmt.Sprintf("CORS Misconfiguration - Origin '%s' Reflected", origin)
 		desc := fmt.Sprintf("Server reflects arbitrary origin '%s' back in Access-Control-Allow-Origin header.", origin)
 
 		if origin == "*" {
@@ -341,6 +434,13 @@ func (s *Scanner) testOrigin(targetURL, origin string) *ScanResult {
 				title = "CORS Misconfiguration - Credentials Exposed"
 				desc = fmt.Sprintf("Server reflects arbitrary origin '%s' and allows credentials (Access-Control-Allow-Credentials: true).", origin)
 			}
+		}
+
+		// Real-time output: show finding immediately
+		if !s.config.Silent {
+			color.New(color.FgHiGreen, color.Bold).Printf("[FOUND] ")
+			color.New(color.FgWhite).Printf("%s (Origin: %s) ", targetURL, origin)
+			color.New(color.FgHiGreen, color.Bold).Printf("--> %s [%s]\n", vulnType, severity)
 		}
 
 		return &ScanResult{
@@ -367,6 +467,13 @@ func (s *Scanner) testOrigin(targetURL, origin string) *ScanResult {
 
 	// Check for partial reflection (prefix/suffix matching)
 	if s.analyzer.IsPartialReflection(origin, allowOrigin) && !s.detector.isTrustedOrigin(targetURL, origin) {
+		// Real-time output: show partial reflection finding
+		if !s.config.Silent {
+			color.New(color.FgHiGreen, color.Bold).Printf("[FOUND] ")
+			color.New(color.FgWhite).Printf("%s (Origin: %s) ", targetURL, origin)
+			color.New(color.FgHiGreen, color.Bold).Printf("--> Partial Origin Reflection [MEDIUM]\n")
+		}
+
 		return &ScanResult{
 			ID:              utils.GenerateID(),
 			URL:             targetURL,
@@ -386,6 +493,29 @@ func (s *Scanner) testOrigin(targetURL, origin string) *ScanResult {
 			BypassTechnique: "Partial Match Bypass",
 			Remediation:     "Use exact origin matching instead of prefix/suffix matching.",
 		}
+	}
+
+	// Real-time verbose output: show tested origin that was not reflected
+	if !s.config.Silent && s.config.Verbose {
+		color.New(color.FgHiBlue, color.Bold).Printf("[INFO] ")
+		color.New(color.FgWhite).Printf("%s (Origin: %s) --> Not Reflected\n", targetURL, origin)
+	}
+
+	if s.config.ShowAll {
+		s.recordSafeResult(&ScanResult{
+			ID:          utils.GenerateID(),
+			URL:         targetURL,
+			Origin:      origin,
+			Method:      "GET",
+			Status:      "SAFE",
+			StatusCode:  resp.StatusCode,
+			Severity:    "INFO",
+			VulnType:    "Origin Not Reflected",
+			Title:       fmt.Sprintf("Safe Origin Check - '%s'", origin),
+			Description: fmt.Sprintf("Origin '%s' was tested and not reflected or accepted by the server.", origin),
+			Headers:     s.analyzer.ExtractCORSHeaders(resp.Headers),
+			Timestamp:   time.Now(),
+		})
 	}
 
 	return nil
@@ -408,11 +538,18 @@ func (s *Scanner) phase3NullByteInjection(targetURL string) []*ScanResult {
 		}
 
 		atomic.AddInt64(&s.stats.TotalRequests, 1)
+		atomic.AddInt64(&s.stats.TotalOriginsTested, 1)
 
 		allowOrigin := resp.Headers.Get("Access-Control-Allow-Origin")
 
 		// Check if null byte stripped and origin allowed
 		if allowOrigin != "" && s.analyzer.IsNullByteBypassSuccessful(payload, allowOrigin) {
+			// Real-time output
+			if !s.config.Silent {
+				color.New(color.FgHiGreen, color.Bold).Printf("[FOUND] ")
+				color.New(color.FgWhite).Printf("%s (Origin: %s) ", targetURL, payload)
+				color.New(color.FgHiGreen, color.Bold).Printf("--> Null Byte Injection [CRITICAL]\n")
+			}
 			results = append(results, &ScanResult{
 				ID:              utils.GenerateID(),
 				URL:             targetURL,
@@ -432,6 +569,9 @@ func (s *Scanner) phase3NullByteInjection(targetURL string) []*ScanResult {
 				BypassTechnique: "Null Byte Injection",
 				Remediation:     "Sanitize input properly. Reject origins containing null bytes.",
 			})
+		} else if !s.config.Silent && s.config.Verbose {
+			color.New(color.FgHiBlue, color.Bold).Printf("[INFO] ")
+			color.New(color.FgWhite).Printf("%s (NullByte: %s) --> Not Bypassed\n", targetURL, payload)
 		}
 	}
 
@@ -536,12 +676,19 @@ func (s *Scanner) phase5CredentialTesting(targetURL string) []*ScanResult {
 		}
 
 		atomic.AddInt64(&s.stats.TotalRequests, 1)
+		atomic.AddInt64(&s.stats.TotalOriginsTested, 1)
 
 		allowOrigin := resp.Headers.Get("Access-Control-Allow-Origin")
 		allowCreds := resp.Headers.Get("Access-Control-Allow-Credentials")
 
 		// Critical: Allow-Credentials: true with non-exact origin
 		if allowCreds == "true" && allowOrigin != "" && allowOrigin != targetURL {
+			// Real-time output
+			if !s.config.Silent {
+				color.New(color.FgHiGreen, color.Bold).Printf("[FOUND] ")
+				color.New(color.FgWhite).Printf("%s (Origin: %s) ", targetURL, origin)
+				color.New(color.FgHiGreen, color.Bold).Printf("--> Credential Leakage [CRITICAL]\n")
+			}
 			results = append(results, &ScanResult{
 				ID:          utils.GenerateID(),
 				URL:         targetURL,
@@ -564,6 +711,9 @@ func (s *Scanner) phase5CredentialTesting(targetURL string) []*ScanResult {
 				BypassTechnique: "Credential Exposure",
 				Remediation:     "Never set Access-Control-Allow-Credentials: true with wildcard or untrusted origins.",
 			})
+		} else if !s.config.Silent && s.config.Verbose {
+			color.New(color.FgHiBlue, color.Bold).Printf("[INFO] ")
+			color.New(color.FgWhite).Printf("%s (Credential Test: %s) --> No Leakage\n", targetURL, origin)
 		}
 	}
 
@@ -587,6 +737,7 @@ func (s *Scanner) phase6PreflightAnalysis(targetURL string) []*ScanResult {
 	}
 
 	atomic.AddInt64(&s.stats.TotalRequests, 1)
+	atomic.AddInt64(&s.stats.TotalOriginsTested, 1)
 
 	allowMethods := resp.Headers.Get("Access-Control-Allow-Methods")
 	allowHeaders := resp.Headers.Get("Access-Control-Allow-Headers")
@@ -600,7 +751,7 @@ func (s *Scanner) phase6PreflightAnalysis(targetURL string) []*ScanResult {
 				ID:          utils.GenerateID(),
 				URL:         targetURL,
 				Origin:      "https://evil.com",
-				Method:      "OPTIONS (Preflight)",
+				Method:      "OPTIONS",
 				Status:      "VULNERABLE",
 				StatusCode:  resp.StatusCode,
 				Severity:    "HIGH",
@@ -659,6 +810,23 @@ func (s *Scanner) testNullOrigin(targetURL string, existingHeaders map[string]st
 			IsConfirmed: true,
 			Remediation: "Reject 'null' origin explicitly in server-side validation.",
 		}
+	}
+
+	if s.config.ShowAll {
+		s.recordSafeResult(&ScanResult{
+			ID:          utils.GenerateID(),
+			URL:         targetURL,
+			Origin:      "null",
+			Method:      "GET",
+			Status:      "SAFE",
+			StatusCode:  resp.StatusCode,
+			Severity:    "INFO",
+			VulnType:    "Null Origin Check",
+			Title:       "Safe Check - Null Origin Rejected",
+			Description: "Server correctly rejected 'null' origin.",
+			Headers:     s.analyzer.ExtractCORSHeaders(resp.Headers),
+			Timestamp:   time.Now(),
+		})
 	}
 
 	return nil
@@ -771,6 +939,33 @@ func (s *Scanner) generatePreflightPOC(targetURL string) string {
 </script>`, targetURL)
 }
 
+// GetTotalPayloadCount returns the exact total number of origin payloads to be tested across all target URLs and phases
+func (s *Scanner) GetTotalPayloadCount() int {
+	total := 0
+	for _, targetURL := range s.config.TargetURLs {
+		// Phase 2: Advanced origins + custom origins from file
+		total += len(s.payloadGen.GenerateAdvancedOrigins(targetURL))
+		if s.config.OriginsFile != "" {
+			total += len(s.payloadGen.LoadFromFile(s.config.OriginsFile))
+		}
+		// Phase 3: Null byte injection payloads
+		total += len(s.payloadGen.GenerateNullBytePayloads(targetURL))
+		// Phase 4: Bypass techniques
+		total += len(s.payloadGen.GenerateUnderscoreSubdomainOrigins(targetURL))
+		total += len(s.payloadGen.GenerateCaseVariations(targetURL))
+		total += len(s.payloadGen.GenerateURLEncodedOrigins(targetURL))
+		total += len(s.payloadGen.GenerateBackslashBypassOrigins(targetURL))
+		total += len(s.payloadGen.GenerateAtSymbolBypassOrigins(targetURL))
+		total += len(s.payloadGen.GenerateFragmentBypassOrigins(targetURL))
+		total += len(s.payloadGen.GenerateDNSRebindingOrigins())
+		// Phase 5: Credential testing origins (3)
+		total += 3
+		// Phase 6: Preflight analysis (1)
+		total += 1
+	}
+	return total
+}
+
 func (s *Scanner) GetStats() *ScanStats {
 	return s.stats
 }
@@ -787,6 +982,10 @@ func containsIgnoreCase(s, substr string) bool {
 }
 
 func extractDomain(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	if !strings.HasPrefix(strings.ToLower(rawURL), "http://") && !strings.HasPrefix(strings.ToLower(rawURL), "https://") {
+		rawURL = "https://" + rawURL
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return rawURL

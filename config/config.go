@@ -28,6 +28,9 @@ type Config struct {
 	Silent         bool
 	NoColor        bool
 	FollowRedirect bool
+	ShowAll        bool
+	ShowFailed     bool
+	Insecure       bool // Skip TLS certificate verification
 
 	// HTTP Settings
 	UserAgent     string
@@ -43,6 +46,12 @@ type Config struct {
 }
 
 func (c *Config) Validate() error {
+	// Validate proxy URL if specified
+	if c.ProxyURL != "" {
+		if !strings.HasPrefix(c.ProxyURL, "http://") && !strings.HasPrefix(c.ProxyURL, "https://") && !strings.HasPrefix(c.ProxyURL, "socks5://") {
+			return fmt.Errorf("invalid proxy URL protocol: %s", c.ProxyURL)
+		}
+	}
 	// Validate targets
 	if len(c.TargetURLs) == 0 {
 		return fmt.Errorf("no targets specified")

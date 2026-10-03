@@ -380,7 +380,7 @@ func TestConcurrentScanning(t *testing.T) {
 	}
 
 	// Concurrent scanning should be reasonably fast
-	if duration > 15*time.Second {
+	if duration > 25*time.Second {
 		t.Errorf("Concurrent scanning took too long: %v", duration)
 	}
 

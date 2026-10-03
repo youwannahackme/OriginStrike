@@ -2,7 +2,9 @@ package payloads
 
 import (
 	"fmt"
+	"net"
 	"net/url"
+	"os"
 	"strings"
 )
 
@@ -346,24 +348,51 @@ func (g *Generator) GenerateDNSRebindingOrigins() []string {
 
 // Load custom origins from file
 func (g *Generator) LoadFromFile(filepath string) []string {
-	// Implementation for loading from file
-	// Would read file and parse origins
-	return []string{}
+	data, err := os.ReadFile(filepath)
+	if err != nil {
+		return []string{}
+	}
+
+	var origins []string
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		origins = append(origins, line)
+	}
+
+	return origins
 }
 
 // Helper functions
 func extractDomain(targetURL string) string {
+	targetURL = strings.TrimSpace(targetURL)
+	if !strings.HasPrefix(strings.ToLower(targetURL), "http://") && !strings.HasPrefix(strings.ToLower(targetURL), "https://") {
+		targetURL = "https://" + targetURL
+	}
+
 	u, err := url.Parse(targetURL)
 	if err != nil {
 		return targetURL
 	}
 
-	parts := strings.Split(u.Hostname(), ".")
+	hostname := u.Hostname()
+	if hostname == "" {
+		return targetURL
+	}
+
+	if net.ParseIP(hostname) != nil {
+		return hostname
+	}
+
+	parts := strings.Split(hostname, ".")
 	if len(parts) >= 2 {
 		return strings.Join(parts[len(parts)-2:], ".")
 	}
 
-	return u.Hostname()
+	return hostname
 }
 
 func mixCase(s string) string {

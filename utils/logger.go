@@ -60,7 +60,7 @@ func NewLogger(level LogLevel, output, errorOutput io.Writer) *Logger {
 		level:       level,
 		output:      output,
 		errorOutput: errorOutput,
-		timestamp:   true,
+		timestamp:   false,
 		callerInfo:  false,
 		colorOutput: SupportsColor(),
 	}
@@ -74,6 +74,7 @@ func NewFileLogger(level LogLevel, filePath string) (*Logger, error) {
 
 	logger := NewLogger(level, file, file)
 	logger.file = file
+	logger.timestamp = true
 
 	return logger, nil
 }

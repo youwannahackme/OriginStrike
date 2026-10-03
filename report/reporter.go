@@ -107,14 +107,31 @@ type SummaryStatistics struct {
 }
 
 func CalculateSummaryStats(results []*core.ScanResult, stats *core.ScanStats) SummaryStatistics {
+	totalURLs := 0
+	totalRequests := int64(0)
+	totalOriginsTested := int64(0)
+	scanDuration := "0s"
+	var startTime, endTime time.Time
+
+	if stats != nil {
+		totalURLs = int(stats.TotalURLs)
+		totalRequests = stats.TotalRequests
+		totalOriginsTested = stats.TotalOriginsTested
+		if !stats.StartTime.IsZero() && !stats.EndTime.IsZero() {
+			scanDuration = stats.EndTime.Sub(stats.StartTime).String()
+		}
+		startTime = stats.StartTime
+		endTime = stats.EndTime
+	}
+
 	summary := SummaryStatistics{
-		TotalURLs:          int(stats.TotalURLs),
+		TotalURLs:          totalURLs,
 		VulnerableURLs:     len(uniqueURLs(results)),
-		TotalRequests:      stats.TotalRequests,
-		TotalOriginsTested: stats.TotalOriginsTested,
-		ScanDuration:       stats.EndTime.Sub(stats.StartTime).String(),
-		StartTime:          stats.StartTime,
-		EndTime:            stats.EndTime,
+		TotalRequests:      totalRequests,
+		TotalOriginsTested: totalOriginsTested,
+		ScanDuration:       scanDuration,
+		StartTime:          startTime,
+		EndTime:            endTime,
 		BySeverity:         make(map[string]int),
 		ByType:             make(map[string]int),
 		ByBypassTechnique:  make(map[string]int),

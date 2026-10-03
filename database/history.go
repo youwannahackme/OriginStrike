@@ -359,8 +359,8 @@ func (hm *HistoryManager) evictOldest() {
 	oldest := hm.entries[0]
 	hm.entries = hm.entries[1:]
 
-	// Update index
-	delete(hm.index, oldest.TargetURL)
+	// Rebuild index after slice shift
+	hm.rebuildIndex()
 
 	// Remove from disk
 	os.Remove(hm.getEntryFilePath(oldest.ID))
@@ -403,6 +403,9 @@ func (hm *HistoryManager) loadHistory() error {
 	sort.Slice(hm.entries, func(i, j int) bool {
 		return hm.entries[i].Timestamp.After(hm.entries[j].Timestamp)
 	})
+
+	// Rebuild index after sorting
+	hm.rebuildIndex()
 
 	return nil
 }

@@ -1,6 +1,7 @@
 package http
 
 import (
+	"bytes"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -39,9 +40,14 @@ type Response struct {
 }
 
 func NewClient(cfg *config.Config) *Client {
+	insecure := false
+	if cfg.Insecure {
+		insecure = true
+	}
+
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: false,
+			InsecureSkipVerify: insecure,
 			MinVersion:         tls.VersionTLS12,
 		},
 		DialContext: (&net.Dialer{
@@ -55,7 +61,13 @@ func NewClient(cfg *config.Config) *Client {
 		ExpectContinueTimeout: 1 * time.Second,
 		ResponseHeaderTimeout: cfg.Timeout,
 		DisableKeepAlives:     false,
-		MaxIdleConnsPerHost:   10,
+		MaxIdleConnsPerHost:   20,
+	}
+
+	if cfg.ProxyURL != "" {
+		if proxyURL, err := url.Parse(cfg.ProxyURL); err == nil {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
 	}
 
 	jar, _ := cookiejar.New(nil)
@@ -116,31 +128,13 @@ func (c *Client) DoRequest(targetURL, method string, customHeaders map[string]st
 		targetURL = parsedURL.String()
 	}
 
-	// Create request
-	req, err := http.NewRequest(method, targetURL, body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	// Set default headers
-	c.setDefaultHeaders(req)
-
-	// Set custom headers
-	for key, value := range customHeaders {
-		req.Header.Set(key, value)
-	}
-
-	// Set config custom headers
-	for key, value := range c.config.CustomHeaders {
-		if _, exists := req.Header[key]; !exists {
-			req.Header.Set(key, value)
-		}
-	}
-
-	// Set Cookie header if configured and not overridden
-	if c.config.Cookie != "" {
-		if _, exists := req.Header["Cookie"]; !exists {
-			req.Header.Set("Cookie", c.config.Cookie)
+	// Buffer body if present to allow retries without body exhaustion
+	var bodyBytes []byte
+	if body != nil {
+		var readErr error
+		bodyBytes, readErr = io.ReadAll(body)
+		if readErr != nil {
+			return nil, fmt.Errorf("failed to read request body: %w", readErr)
 		}
 	}
 
@@ -151,6 +145,38 @@ func (c *Client) DoRequest(targetURL, method string, customHeaders map[string]st
 	for attempt := 0; attempt <= c.config.RetryCount; attempt++ {
 		if attempt > 0 {
 			time.Sleep(time.Duration(attempt) * time.Second)
+		}
+
+		var bodyReader io.Reader
+		if bodyBytes != nil {
+			bodyReader = bytes.NewReader(bodyBytes)
+		}
+
+		req, err := http.NewRequest(method, targetURL, bodyReader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create request: %w", err)
+		}
+
+		// Set default headers
+		c.setDefaultHeaders(req)
+
+		// Set custom headers
+		for key, value := range customHeaders {
+			req.Header.Set(key, value)
+		}
+
+		// Set config custom headers
+		for key, value := range c.config.CustomHeaders {
+			if _, exists := req.Header[key]; !exists {
+				req.Header.Set(key, value)
+			}
+		}
+
+		// Set Cookie header if configured and not overridden
+		if c.config.Cookie != "" {
+			if _, exists := req.Header["Cookie"]; !exists {
+				req.Header.Set("Cookie", c.config.Cookie)
+			}
 		}
 
 		startTime := time.Now()

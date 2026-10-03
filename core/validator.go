@@ -84,30 +84,36 @@ func (v *Validator) setupValidationRules() {
 	}
 }
 
-func (v *Validator) ValidateAll(results []*ScanResult) []*ScanResult {
+func (v *Validator) ValidateAll(results []*ScanResult) ([]*ScanResult, []*ScanResult) {
 	var validatedResults []*ScanResult
+	var filteredResults []*ScanResult
 	uniqueResults := make(map[string]*ScanResult)
 
 	for _, result := range results {
 		isValid, reason := v.Validate(result)
 		if !isValid {
-			if v.config.Verbose {
+			if v.config != nil && v.config.Verbose {
 				logFilteredResult(result, reason)
 			}
+			filteredCopy := *result
+			filteredCopy.Status = "FILTERED"
+			filteredCopy.Description = fmt.Sprintf("Filtered out by validation rules (%s). Original: %s", reason, result.Description)
+			filteredResults = append(filteredResults, &filteredCopy)
 			continue
 		}
 
 		result.Confidence = v.calculateFinalConfidence(result)
 		
-		// Deduplicate results per URL and Vulnerability Type
-		key := fmt.Sprintf("%s|%s", result.URL, result.VulnType)
+		// Deduplicate results per URL, Vulnerability Type, and Bypass Technique
+		key := fmt.Sprintf("%s|%s|%s", result.URL, result.VulnType, result.BypassTechnique)
 		existing, exists := uniqueResults[key]
 		if !exists {
 			uniqueResults[key] = result
 		} else {
-			// Keep the one with higher confidence, or higher severity rank
+			// Keep the one with higher confidence, higher severity rank, or canonical evil.com origin
 			if result.Confidence > existing.Confidence ||
-				(result.Confidence == existing.Confidence && severityRank(result.Severity) > severityRank(existing.Severity)) {
+				(result.Confidence == existing.Confidence && severityRank(result.Severity) > severityRank(existing.Severity)) ||
+				(result.Confidence == existing.Confidence && severityRank(result.Severity) == severityRank(existing.Severity) && result.Origin == "https://evil.com") {
 				uniqueResults[key] = result
 			}
 		}
@@ -125,7 +131,7 @@ func (v *Validator) ValidateAll(results []*ScanResult) []*ScanResult {
 		return validatedResults[i].Confidence > validatedResults[j].Confidence
 	})
 
-	return validatedResults
+	return validatedResults, filteredResults
 }
 
 func (v *Validator) Validate(result *ScanResult) (bool, string) {
@@ -242,9 +248,9 @@ func (v *Validator) filterFalsePositives(result *ScanResult) (bool, string) {
 		{"::1", "IPv6 loopback - internal testing"},
 		{".local", "Local network - may be intentional"},
 		{".internal", "Internal network - may be intentional"},
-		{".dev", "Development environment"},
 		{".test", "Testing environment"},
 		{".example", "Example domain"},
+		{".invalid", "Invalid domain"},
 	}
 
 	// Parse the origin to extract the host accurately
