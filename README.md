@@ -45,17 +45,17 @@ OriginStrike is a high-performance, concurrent CORS vulnerability scanner and ex
 OriginStrike utilizes a multi-phase pipeline to ensure comprehensive coverage and zero false positives:
 
 ```mermaid
-graph TD
-    A[Target URLs / File Input] --> B[Target Normalization & Deduplication]
-    B --> C[Phase 1: Basic CORS Header Extraction]
-    C --> D[Phase 2: Multi-Origin Fuzzing]
-    D --> E[Phase 3: Null Byte & Encoding Bypasses]
-    E --> F[Phase 4: Suffix/Prefix & Special Character Fuzzing]
-    F --> G[Phase 5: Authenticated Session Testing]
-    G --> H[Detection Engine: Vulnerability Analysis]
-    H --> I[Validation Pipeline: Dynamic Verification]
-    I -->|Passed| J[Reporter: JSON / CSV / HTML Output]
-    I -->|Failed| K[Dropped as False Positive]
+flowchart TD
+    A["Target URLs / File Input"] --> B["Target Normalization & Deduplication"]
+    B --> C["Phase 1: Basic CORS Header Extraction"]
+    C --> D["Phase 2: Multi-Origin Fuzzing"]
+    D --> E["Phase 3: Null Byte & Encoding Bypasses"]
+    E --> F["Phase 4: Suffix / Prefix & Special Character Fuzzing"]
+    F --> G["Phase 5: Authenticated Session Testing"]
+    G --> H["Detection Engine: Vulnerability Analysis"]
+    H --> I["Validation Pipeline: Dynamic Verification"]
+    I -->|Passed| J["Reporter: JSON / CSV / HTML Output"]
+    I -->|Failed| K["Dropped as False Positive"]
 ```
 
 1. **Parser**: Normalizes raw inputs, adds default schemes, and resolves file paths.
