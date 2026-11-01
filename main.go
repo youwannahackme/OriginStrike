@@ -39,6 +39,7 @@ var (
 	showFailed     bool
 	proxyURL       string
 	insecure       bool
+	jsonFlag       bool
 )
 
 func main() {
@@ -100,7 +101,8 @@ func init() {
 	rootCmd.PersistentFlags().IntVar(&delay, "delay", 0, "Delay between requests (ms)")
 	rootCmd.PersistentFlags().IntVar(&retryCount, "retries", 3, "Retry count on failure")
 	rootCmd.PersistentFlags().StringVar(&cookie, "cookie", "", "Custom Cookie header value (e.g., 'session=1234')")
-	rootCmd.PersistentFlags().StringVar(&proxyURL, "proxy", "", "HTTP/HTTPS/SOCKS5 proxy URL (e.g., http://127.0.0.1:8080)")
+	rootCmd.PersistentFlags().StringVarP(&proxyURL, "proxy", "x", "", "HTTP/HTTPS/SOCKS5 proxy URL (e.g., http://127.0.0.1:8080)")
+	rootCmd.PersistentFlags().BoolVarP(&jsonFlag, "json", "j", false, "Output format as JSON")
 	rootCmd.PersistentFlags().BoolVarP(&insecure, "insecure", "k", false, "Skip TLS certificate verification")
 	rootCmd.PersistentFlags().BoolVarP(&showAll, "show-all", "a", false, "Show all results on CLI including safe checks and failed verifications")
 	rootCmd.PersistentFlags().BoolVar(&showFailed, "show-failed", false, "Show failed verifications and filtered results on CLI")
@@ -115,9 +117,22 @@ func runScanner(cmd *cobra.Command, args []string) {
 		color.NoColor = true
 	}
 
+	if jsonFlag {
+		outputFormat = "json"
+	}
+
+	if len(targetURLs) == 0 && listFile == "" && len(args) > 0 {
+		targetURLs = args
+	}
+
 	if len(targetURLs) == 0 && listFile == "" {
-		cmd.Help()
-		return
+		stat, _ := os.Stdin.Stat()
+		if (stat.Mode() & os.ModeCharDevice) == 0 {
+			listFile = "-"
+		} else {
+			cmd.Help()
+			return
+		}
 	}
 
 	// Combine and parse target URLs from -u and -l flags

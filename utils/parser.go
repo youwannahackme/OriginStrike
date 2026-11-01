@@ -3,6 +3,7 @@ package utils
 import (
 	"bufio"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"strings"
@@ -72,14 +73,18 @@ func NormalizeTarget(input string) (string, error) {
 }
 
 func ParseFromFile(filepath string) ([]string, error) {
-	file, err := os.Open(filepath)
-	if err != nil {
-		return nil, err
+	var r io.Reader = os.Stdin
+	if filepath != "-" {
+		file, err := os.Open(filepath)
+		if err != nil {
+			return nil, err
+		}
+		defer file.Close()
+		r = file
 	}
-	defer file.Close()
 
 	var targets []string
-	scanner := bufio.NewScanner(file)
+	scanner := bufio.NewScanner(r)
 
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
@@ -105,6 +110,9 @@ func ParseFromFile(filepath string) ([]string, error) {
 }
 
 func IsFile(path string) bool {
+	if path == "-" {
+		return true
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		return false

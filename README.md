@@ -92,6 +92,21 @@ go build -o originstrike main.go
 
 ## 💻 Usage & Flags
 
+> [!IMPORTANT]
+> **Authenticated CORS Scanning (`--cookie` / `--header`)**:
+> The most critical CORS vulnerabilities (e.g. `Access-Control-Allow-Credentials: true` with dynamic origin reflection) manifest on **authenticated, private API routes** (`/api/account`, `/api/user/profile`, `/api/billing`). Unauthenticated scans against landing pages will miss high-severity credentialed leaks!
+> 
+> **Always run authenticated audits on sensitive endpoints:**
+> ```bash
+> # Authenticated scan with session cookie & Anubis proxy
+> originstrike -u "https://api.target.com/user/profile" --cookie "session=abc123xyz" -x http://127.0.0.1:8080 -j
+> 
+> # Authenticated batch scan with custom authorization token
+> originstrike -l api_endpoints.txt --cookie "PHPSESSID=s921kd91k; user=admin" -o cors_report.html -f html
+> ```
+
+
+
 ```bash
 ./originstrike -u <target> [flags]
 ```
